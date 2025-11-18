@@ -64,7 +64,7 @@ const executeEditImage = async (prompt: string, image: { data: string; mimeType:
 
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash-image',
-      contents: [{ parts: [imagePart, textPart] }],
+      contents: { parts: [imagePart, textPart] },
       config: {
         responseModalities: [Modality.IMAGE],
       },
@@ -109,7 +109,7 @@ const generateFromReference = async (prompt: string, images: { data: string; mim
     try {
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash-image',
-            contents: [{ parts: allParts }],
+            contents: { parts: allParts },
             config: {
                 responseModalities: [Modality.IMAGE],
             },
@@ -134,6 +134,46 @@ const generateFromReference = async (prompt: string, images: { data: string; mim
     } catch (error) {
         console.error("Error executing generation from reference:", error);
         throw new Error("Failed to generate image from reference.");
+    }
+};
+
+const executeSearch = async (query: string): Promise<{ text: string; sources?: GroundingSource[] }> => {
+    try {
+        const result = await ai.models.generateContent({
+            model: 'gemini-2.5-flash', // Search grounding works with flash
+            contents: [{ role: 'user', parts: [{ text: query }] }],
+            config: {
+                tools: [{ googleSearch: {} }],
+            },
+        });
+
+        const groundingMetadata = result.candidates?.[0]?.groundingMetadata;
+        // Ensure we correctly type the sources after filtering
+        const sources = groundingMetadata?.groundingChunks
+            ?.map(chunk => chunk.web)
+            .filter((web): web is { uri: string; title: string } => !!web)
+            .map(web => ({ web })) as GroundingSource[] | undefined;
+        
+        return { text: result.text, sources };
+    } catch (error) {
+        console.error("Error executing search:", error);
+        throw new Error("Failed to get information from Google Search.");
+    }
+};
+
+const executeComplexQuery = async (query: string): Promise<{ text: string }> => {
+    try {
+        const result = await ai.models.generateContent({
+            model: 'gemini-2.5-pro',
+            contents: [{ role: 'user', parts: [{ text: query }] }],
+            config: {
+                thinkingConfig: { thinkingBudget: 32768 },
+            },
+        });
+        return { text: result.text };
+    } catch (error) {
+        console.error("Error executing complex query:", error);
+        throw new Error("Failed to process the complex query.");
     }
 };
 
@@ -166,6 +206,32 @@ export const executePendingImageGeneration = async (prompt: string, aspectRatio:
     };
 };
 
+export const generateSpeech = async (text: string): Promise<string> => {
+    try {
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash-preview-tts",
+            contents: { parts: [{ text: text }] },
+            config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                    voiceConfig: {
+                      prebuiltVoiceConfig: { voiceName: 'Kore' }, // A neutral, pleasant voice
+                    },
+                },
+            },
+        });
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (!base64Audio) {
+            throw new Error("No audio data returned from TTS model.");
+        }
+        return base64Audio;
+    } catch (error) {
+        console.error("Error generating speech:", error);
+        throw new Error("Failed to generate speech.");
+    }
+};
+
+
 // --- Core Chat Logic ---
 
 const systemInstruction: Content = {
@@ -174,6 +240,8 @@ const systemInstruction: Content = {
         text: `You are PAK AI, a helpful and friendly multi-modal AI assistant.
 - Your primary function is to have a helpful conversation and answer user questions. When answering, strive to be comprehensive, detailed, and thoughtful. For complex or long questions, provide well-structured and thorough responses. Avoid overly brief replies unless the user's query is very simple.
 - You have access to a set of tools to perform tasks. When a user asks for something that requires a tool, you must call the appropriate tool.
+- Web Search: If the user asks a question that requires current, up-to-date information from the web (e.g., 'what's the weather today?', recent news, specific facts), use the 'searchTheWeb' tool.
+- Complex Tasks: For very complex questions that require deep reasoning, advanced logic, multi-step problem solving, or coding, use the 'complexQuery' tool.
 - Image Generation: If the user asks you to create or generate an image from a text description, use the 'generateImage' tool.
 - Image Editing: If the user provides an image and asks to change it (e.g., 'change the background', 'make the car red'), use the 'editImage' tool.
 - Face Consistency: If the user provides one image of a person and asks to create a new scene (e.g., "put me on a beach"), use the 'generateFromReference' tool.
@@ -205,6 +273,16 @@ const tools: FunctionDeclaration[] = [
         description: 'Generates a new image using one or more reference images. Use for tasks like placing a person in a new scene (face consistency) or combining elements from multiple photos.',
         parameters: { type: Type.OBJECT, properties: { prompt: { type: Type.STRING, description: 'A detailed prompt describing the desired output.' } }, required: ['prompt'] }
     },
+    {
+        name: 'searchTheWeb',
+        description: 'Searches the web for up-to-date information on current events, news, or specific facts.',
+        parameters: { type: Type.OBJECT, properties: { query: { type: Type.STRING, description: 'The user query to search for.' } }, required: ['query'] }
+    },
+    {
+        name: 'complexQuery',
+        description: 'Handles complex user queries requiring deep reasoning, advanced logic, or coding by enabling a special thinking mode.',
+        parameters: { type: Type.OBJECT, properties: { query: { type: Type.STRING, description: 'The original user query that is complex.' } }, required: ['query'] }
+    },
 ];
 
 export const sendMessage = async (
@@ -223,7 +301,7 @@ export const sendMessage = async (
     ];
 
     const result = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-flash-lite-latest',
         contents: contents,
         config: {
             systemInstruction: (systemInstruction.parts[0] as { text: string }).text,
@@ -240,6 +318,16 @@ export const sendMessage = async (
     const tool = functionCalls[0];
     const toolName = tool.name;
     const toolArgs = tool.args;
+
+    if (toolName === 'searchTheWeb') {
+        const query = (toolArgs.query as string) || text;
+        return await executeSearch(query);
+    }
+    
+    if (toolName === 'complexQuery') {
+        const query = (toolArgs.query as string) || text;
+        return await executeComplexQuery(query);
+    }
 
     if (toolName === 'generateImage') {
         const prompt = toolArgs.prompt as string;

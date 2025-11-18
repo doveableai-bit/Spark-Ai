@@ -21,4 +21,5 @@ export interface ChatMessage {
   isError?: boolean;
   prompt?: string; // The prompt used for image generation/editing
   needsAspectRatio?: boolean; // If true, UI should show aspect ratio selector
+  feedback?: 'liked' | 'disliked';
 }

@@ -1,19 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Sender } from './types';
 import type { ChatMessage } from './types';
-import { sendMessage, executePendingImageGeneration, resizeImage } from './services/geminiService';
+import { sendMessage, executePendingImageGeneration, resizeImage, generateSpeech } from './services/geminiService';
 import { Content } from '@google/genai';
-
-
-declare global {
-    interface Window {
-        marked: {
-            parse(markdown: string): string;
-        };
-        SpeechRecognition: any;
-        webkitSpeechRecognition: any;
-    }
-}
 
 // --- Constants ---
 const MAX_CHAR_LIMIT = 8000;
@@ -33,6 +22,35 @@ const fileToBase64 = (file: File): Promise<string> =>
     reader.onload = () => resolve((reader.result as string).split(',')[1]);
     reader.onerror = (error) => reject(error);
   });
+
+const decode = (base64: string): Uint8Array => {
+    const binaryString = atob(base64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+};
+
+async function decodeAudioData(
+  data: Uint8Array,
+  ctx: AudioContext,
+  sampleRate: number,
+  numChannels: number,
+): Promise<AudioBuffer> {
+  const dataInt16 = new Int16Array(data.buffer);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
+  }
+  return buffer;
+}
 
 
 // --- SVG Icons ---
@@ -76,36 +94,59 @@ const MicrophoneIcon = () => (
 );
 
 const SpeakerWaveIcon = () => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
-      <path d="M13.5 4.06c0-1.336-1.616-2.005-2.56-1.06l-4.5 4.5H4.508c-1.141 0-2.318.664-2.66 1.905A9.76 9.76 0 0 0 1.5 12c0 .898.121 1.768.348 2.595.341 1.24 1.518 1.905 2.66 1.905H6.44l4.5 4.5c.945.945 2.56.276 2.56-1.06V4.06zM18.584 5.106a.75.75 0 0 1 1.06 0c3.807 3.808 3.807 9.98 0 13.788a.75.75 0 0 1-1.06-1.06 8.25 8.25 0 0 0 0-11.668.75.75 0 0 1 0-1.06z" />
-      <path d="M15.932 7.757a.75.75 0 0 1 1.061 0 6 6 0 0 1 0 8.486.75.75 0 0 1-1.06-1.061 4.5 4.5 0 0 0 0-6.364.75.75 0 0 1 0-1.06z" />
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
     </svg>
 );
 
 const SpeakerXMarkIcon = () => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
-      <path d="M13.5 4.06c0-1.336-1.616-2.005-2.56-1.06l-4.5 4.5H4.508c-1.141 0-2.318.664-2.66 1.905A9.76 9.76 0 0 0 1.5 12c0 .898.121 1.768.348 2.595.341 1.24 1.518 1.905 2.66 1.905H6.44l4.5 4.5c.945.945 2.56.276 2.56-1.06V4.06zM17.78 9.22a.75.75 0 1 0-1.06 1.06L18.94 12l-2.22 2.22a.75.75 0 1 0 1.06 1.06L20 13.06l2.22 2.22a.75.75 0 1 0 1.06-1.06L21.06 12l2.22-2.22a.75.75 0 1 0-1.06-1.06L20 10.94l-2.22-2.22z" />
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 9.75 19.5 12m0 0 2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6.375a9 9 0 0 1 12.728 0M12.75 6.035A5.25 5.25 0 0 1 18 10.262m-10.5 0A5.25 5.25 0 0 1 12 6.035m-7.5 4.227 4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
     </svg>
 );
 const ResizeIcon = () => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
       <path d="M10 3a.75.75 0 0 1 .75.75v1.5h1.5a.75.75 0 0 1 0 1.5h-1.5v1.5a.75.75 0 0 1-1.5 0v-1.5h-1.5a.75.75 0 0 1 0-1.5h1.5v-1.5A.75.75 0 0 1 10 3ZM10 17a.75.75 0 0 1-.75-.75v-1.5h-1.5a.75.75 0 0 1 0-1.5h1.5v-1.5a.75.75 0 0 1 1.5 0v1.5h1.5a.75.75 0 0 1 0 1.5h-1.5v1.5A.75.75 0 0 1 10 17ZM17 10a.75.75 0 0 1-.75.75h-1.5v1.5a.75.75 0 0 1-1.5 0v-1.5h-1.5a.75.75 0 0 1 0-1.5h1.5v-1.5a.75.75 0 0 1 1.5 0v1.5h1.5A.75.75 0 0 1 17 10ZM3 10a.75.75 0 0 1 .75-.75h1.5v-1.5a.75.75 0 0 1 1.5 0v1.5h1.5a.75.75 0 0 1 0 1.5h-1.5v1.5a.75.75 0 0 1-1.5 0v-1.5h-1.5A.75.75 0 0 1 3 10Z" />
     </svg>
 );
 const ReuseIcon = () => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
       <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201-4.42 5.5 5.5 0 0 1 10.852 2.132.75.75 0 0 1-1.423.433A4 4 0 0 0 6.13 8.355a4 4 0 0 0 7.938 1.48.75.75 0 0 1 1.244.789ZM4.688 8.576a.75.75 0 0 1 1.423-.433 4 4 0 0 0 8.239-1.523.75.75 0 0 1 1.244-.789 5.5 5.5 0 0 1-10.852-2.132.75.75 0 0 1 1.423-.433A4 4 0 0 0 13.87 11.645a4 4 0 0 0-7.938-1.48.75.75 0 0 1-1.244-.789Z" clipRule="evenodd" />
     </svg>
 );
-const CopyIcon = () => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+const CopyIcon = () => ( // For Copy Prompt
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
       <path d="M7 3.5A1.5 1.5 0 0 1 8.5 2h3.879a1.5 1.5 0 0 1 1.06.44l3.122 3.121A1.5 1.5 0 0 1 17 6.621V16.5a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 16.5v-13Z" />
       <path d="M4.5 6A1.5 1.5 0 0 0 3 7.5v10A1.5 1.5 0 0 0 4.5 19h7a1.5 1.5 0 0 0 1.5-1.5v-2a.75.75 0 0 0-1.5 0v2A.5.5 0 0 1 11.5 18h-7a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h2a.75.75 0 0 0 0-1.5h-2Z" />
     </svg>
 );
-
+const CopyResponseIcon = () => ( // For Copy Response
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75c-.621 0-1.125-.504-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 3.375-3.375-3.375m0 0L18 5.25m-3.375 3.375a1.125 1.125 0 0 1 1.125-1.125h3.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75" />
+    </svg>
+);
+const LikeIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6.633 10.5c.806 0 1.533-.446 2.031-1.08a9.041 9.041 0 0 1 2.861-2.4c.723-.384 1.35-.956 1.653-1.715a4.498 4.498 0 0 0 .322-1.672V3a.75.75 0 0 1 .75-.75A2.25 2.25 0 0 1 16.5 4.5c0 1.152-.26 2.243-.723 3.218-.266.558.107 1.282.725 1.282h3.126c1.026 0 1.945.694 2.054 1.715.045.422.068.85.068 1.285a11.95 11.95 0 0 1-2.649 7.521c-.388.482-.987.729-1.605.729H13.48c-.483 0-.964-.078-1.423-.23l-3.114-1.04a4.501 4.501 0 0 0-1.423-.23H5.904M6.633 10.5l-1.822-1.822a.75.75 0 0 0-1.06 0l-1.06 1.06a.75.75 0 0 0 0 1.06l1.06 1.06a.75.75 0 0 0 1.06 0l1.822-1.822Z" />
+    </svg>
+);
+const DislikeIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M17.367 13.5c-.806 0-1.533.446-2.031 1.08a9.041 9.041 0 0 1-2.861 2.4c-.723.384-1.35.956-1.653 1.715a4.498 4.498 0 0 0-.322 1.672v.75a.75.75 0 0 1-.75.75A2.25 2.25 0 0 1 7.5 19.5c0-1.152.26-2.243.723-3.218.266-.558-.107-1.282-.725-1.282H4.374c-1.026 0-1.945-.694-2.054-1.715A12.134 12.134 0 0 1 2.25 12c0-1.285.253-2.524.721-3.682.11-.26.311-.49.56-.653H10.52c.483 0 .964.078 1.423.23l3.114 1.04a4.501 4.501 0 0 0 1.423.23h1.994M17.367 13.5l1.822 1.822a.75.75 0 0 0 1.06 0l1.06-1.06a.75.75 0 0 0 0-1.06l-1.06-1.06a.75.75 0 0 0-1.06 0l-1.822 1.822Z" />
+    </svg>
+);
+const RegenerateIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 11.667 0 8.25 8.25 0 0 0 0-11.667l-3.182-3.182m0 0h-4.992m4.992 0v4.992" />
+    </svg>
+);
+const ShareIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0 0a2.25 2.25 0 1 0 3.935 2.186 2.25 2.25 0 0 0-3.935-2.186Zm0-12.814a2.25 2.25 0 1 0 3.933-2.186 2.25 2.25 0 0 0-3.933 2.186Z" />
+    </svg>
+);
 const DownloadIcon = () => (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
       <path d="M10.75 2.75a.75.75 0 0 0-1.5 0v8.614L6.295 8.235a.75.75 0 1 0-1.09 1.03l4.25 4.5a.75.75 0 0 0 1.09 0l4.25-4.5a.75.75 0 0 0-1.09-1.03l-2.955 3.129V2.75Z" />
       <path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z" />
     </svg>
@@ -116,34 +157,46 @@ const DownloadIcon = () => (
 
 interface MessageProps {
     message: ChatMessage;
+    promptToCopy?: string;
+    isSpeaking: boolean;
     onResizeClick: (message: ChatMessage) => void;
     onReuseClick: (message: ChatMessage) => void;
-    onCopyPromptClick: (message: ChatMessage) => void;
+    onCopyPromptClick: (prompt: string) => void;
+    onCopyResponseClick: (text: string) => void;
     onDownloadClick: (message: ChatMessage) => void;
     onAspectRatioSelect: (messageId: string, prompt: string, ratio: string) => void;
+    onLikeClick: (messageId: string) => void;
+    onDislikeClick: (messageId: string) => void;
+    onSpeakClick: (text: string, messageId: string) => void;
+    onRegenerateClick: (messageId: string) => void;
+    onShareClick: (text: string) => void;
 }
 
-const ActionButton: React.FC<{ onClick: () => void; icon: React.ReactNode; label: string }> = ({ onClick, icon, label }) => (
+const IconButton: React.FC<{ onClick: () => void; icon: React.ReactNode; label: string, active?: boolean, isLoading?: boolean }> = ({ onClick, icon, label, active = false, isLoading = false }) => (
     <button
         onClick={onClick}
-        className="flex items-center gap-1.5 text-xs text-gray-300 bg-gray-600/50 hover:bg-gray-600 px-2 py-1 rounded-md transition-colors"
+        className={`p-1.5 rounded-md transition-colors ${active ? 'text-blue-400 bg-blue-500/20' : 'text-gray-400 hover:bg-gray-600 hover:text-gray-200'}`}
         aria-label={label}
+        disabled={isLoading}
     >
-        {icon}
-        {label}
+        {isLoading ? <div className="w-5 h-5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div> : icon}
     </button>
 );
 
-const Message: React.FC<MessageProps> = ({ message, onResizeClick, onReuseClick, onCopyPromptClick, onDownloadClick, onAspectRatioSelect }) => {
+const Message: React.FC<MessageProps> = (props) => {
+    const { message, promptToCopy, isSpeaking, onResizeClick, onReuseClick, onCopyPromptClick, onCopyResponseClick, onDownloadClick, onAspectRatioSelect, onLikeClick, onDislikeClick, onSpeakClick, onRegenerateClick, onShareClick } = props;
     const isUser = message.sender === Sender.User;
     const Icon = isUser ? UserIcon : SparklesIcon;
 
     const parsedText = useMemo(() => {
-        if (!message.text || typeof window.marked === 'undefined') {
+        if (!message.text || typeof (window as any).marked === 'undefined') {
             return { __html: message.text.replace(/\n/g, '<br />') };
         }
-        return { __html: window.marked.parse(message.text) };
+        return { __html: (window as any).marked.parse(message.text) };
     }, [message.text]);
+
+    const showImageActions = !isUser && message.images && message.images.length > 0;
+    const showActionBar = !isUser && !message.isLoading && !message.needsAspectRatio && message.id !== 'init';
 
     return (
         <div className={`flex items-start gap-4 my-4 ${isUser ? 'justify-end' : ''}`}>
@@ -177,12 +230,30 @@ const Message: React.FC<MessageProps> = ({ message, onResizeClick, onReuseClick,
                             </div>
                         )}
 
-                        {!isUser && message.images && message.images.length > 0 && message.prompt && (
+                        {showActionBar && (
                             <div className="flex items-center flex-wrap gap-2 mt-3 pt-3 border-t border-gray-600">
-                                <ActionButton onClick={() => onResizeClick(message)} icon={<ResizeIcon />} label="Resize" />
-                                <ActionButton onClick={() => onReuseClick(message)} icon={<ReuseIcon />} label="Reuse" />
-                                <ActionButton onClick={() => onCopyPromptClick(message)} icon={<CopyIcon />} label="Copy Prompt" />
-                                <ActionButton onClick={() => onDownloadClick(message)} icon={<DownloadIcon />} label="Download" />
+                                { !showImageActions ? (
+                                    <>
+                                        <IconButton onClick={() => onCopyResponseClick(message.text)} icon={<CopyResponseIcon />} label="Copy Response" />
+                                        <IconButton onClick={() => onLikeClick(message.id)} icon={<LikeIcon />} label="Like" active={message.feedback === 'liked'} />
+                                        <IconButton onClick={() => onDislikeClick(message.id)} icon={<DislikeIcon />} label="Dislike" active={message.feedback === 'disliked'} />
+                                        <IconButton onClick={() => onSpeakClick(message.text, message.id)} icon={<SpeakerWaveIcon />} label="Speak" isLoading={isSpeaking} />
+                                        <IconButton onClick={() => onRegenerateClick(message.id)} icon={<RegenerateIcon />} label="Regenerate" />
+                                        <IconButton onClick={() => onShareClick(message.text)} icon={<ShareIcon />} label="Share" />
+                                        <div className="h-4 w-px bg-gray-600 mx-1"></div>
+                                    </>
+                                ) : (
+                                    <>
+                                        <IconButton onClick={() => onResizeClick(message)} icon={<ResizeIcon />} label="Resize" />
+                                        <IconButton onClick={() => onReuseClick(message)} icon={<ReuseIcon />} label="Reuse" />
+                                        <IconButton onClick={() => onDownloadClick(message)} icon={<DownloadIcon />} label="Download" />
+                                        <div className="h-4 w-px bg-gray-600 mx-1"></div>
+                                    </>
+                                )}
+
+                                {promptToCopy && (
+                                    <IconButton onClick={() => onCopyPromptClick(promptToCopy)} icon={<CopyIcon />} label="Copy Prompt" />
+                                )}
                             </div>
                         )}
 
@@ -273,14 +344,17 @@ export default function App() {
     const [isTtsEnabled, setIsTtsEnabled] = useState(false);
     const [resizeTask, setResizeTask] = useState<ChatMessage | null>(null);
     const [toastText, setToastText] = useState<string | null>(null);
+    const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
 
     const recognitionRef = useRef<any>(null);
     const messageListRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
     useEffect(() => {
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
         if (SpeechRecognition) {
             const recognition = new SpeechRecognition();
             recognition.continuous = true;
@@ -308,26 +382,90 @@ export default function App() {
         }
     }, []);
 
+    const cleanTextForSpeech = (text: string) => {
+        return text
+            .replace(/```[\s\S]*?```/g, '(Code block is displayed on screen.)')
+            .replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1')
+            .replace(/(\*|_|`)/g, '');
+    };
+    
+    useEffect(() => {
+        if (!audioContextRef.current) {
+            audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        }
+        return () => {
+            if (audioSourceRef.current) {
+                audioSourceRef.current.stop();
+            }
+        };
+    }, []);
+
+    const playAudio = useCallback(async (base64Audio: string, onEnded: () => void) => {
+        if (!audioContextRef.current) return;
+
+        if (audioSourceRef.current) {
+            audioSourceRef.current.stop();
+        }
+
+        try {
+            const audioBuffer = await decodeAudioData(
+                decode(base64Audio),
+                audioContextRef.current,
+                24000, // Gemini TTS sample rate
+                1, // mono
+            );
+
+            const source = audioContextRef.current.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContextRef.current.destination);
+            source.onended = () => {
+                audioSourceRef.current = null;
+                onEnded();
+            };
+            source.start();
+            audioSourceRef.current = source;
+        } catch (error) {
+            console.error("Error playing audio:", error);
+            onEnded(); // Clear loading state even on error
+        }
+    }, []);
+    
+    const handleSpeakClick = useCallback(async (text: string, messageId: string) => {
+        if (!text || speakingMessageId === messageId) { // Prevent re-clicking while loading
+            if (audioSourceRef.current) {
+                 audioSourceRef.current.stop();
+                 setSpeakingMessageId(null);
+            }
+            return;
+        }
+        
+        setSpeakingMessageId(messageId);
+        try {
+            const cleanText = cleanTextForSpeech(text);
+            const audioData = await generateSpeech(cleanText);
+            await playAudio(audioData, () => setSpeakingMessageId(null));
+        } catch (error) {
+            console.error("Error in speak click handler:", error);
+            showToast("Failed to generate speech.");
+            setSpeakingMessageId(null);
+        }
+
+    }, [playAudio, speakingMessageId]);
+
     useEffect(() => {
         if (!isTtsEnabled) {
-            window.speechSynthesis.cancel();
+            if (audioSourceRef.current) {
+                audioSourceRef.current.stop();
+                setSpeakingMessageId(null);
+            }
             return;
         }
 
         const lastMessage = messages[messages.length - 1];
-        if (lastMessage?.sender === Sender.Bot && lastMessage.text && !lastMessage.isLoading) {
-            const cleanTextForSpeech = (text: string) => {
-                return text
-                    .replace(/```[\s\S]*?```/g, '(Code block is displayed on screen.)')
-                    .replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1')
-                    .replace(/(\*|_|`)/g, '');
-            };
-            const textToSpeak = cleanTextForSpeech(lastMessage.text);
-            const utterance = new SpeechSynthesisUtterance(textToSpeak);
-            window.speechSynthesis.cancel();
-            window.speechSynthesis.speak(utterance);
+        if (lastMessage?.sender === Sender.Bot && lastMessage.text && !lastMessage.isLoading && lastMessage.id !== speakingMessageId) {
+            handleSpeakClick(lastMessage.text, lastMessage.id);
         }
-    }, [messages, isTtsEnabled]);
+    }, [messages, isTtsEnabled, handleSpeakClick, speakingMessageId]);
 
 
     useEffect(() => {
@@ -522,6 +660,7 @@ export default function App() {
     }, []);
 
     const handleResizeClick = (message: ChatMessage) => setResizeTask(message);
+
     const handleReuseImage = (message: ChatMessage) => {
         if (message.images && message.images.length > 0) {
             const imageToReuse = message.images[0];
@@ -540,11 +679,23 @@ export default function App() {
             textareaRef.current?.focus();
         }
     };
-    const handleCopyPromptClick = (message: ChatMessage) => {
-        if (message.prompt) {
-            navigator.clipboard.writeText(message.prompt);
-            setToastText("Prompt copied to clipboard!");
-            setTimeout(() => setToastText(null), 2000);
+    
+    const showToast = (text: string) => {
+        setToastText(text);
+        setTimeout(() => setToastText(null), 2000);
+    };
+
+    const handleCopyPrompt = (prompt: string) => {
+        if (prompt) {
+            navigator.clipboard.writeText(prompt);
+            showToast("Prompt copied to clipboard!");
+        }
+    };
+
+    const handleCopyResponse = (text: string) => {
+        if (text) {
+            navigator.clipboard.writeText(text);
+            showToast("Response copied to clipboard!");
         }
     };
     
@@ -594,6 +745,111 @@ export default function App() {
             setIsProcessing(false);
         }
     }, [resizeTask]);
+    
+    const handleLikeDislike = useCallback((messageId: string, feedback: 'liked' | 'disliked') => {
+        setMessages(prev => prev.map(msg => {
+            if (msg.id === messageId) {
+                // If the user clicks the same button again, remove feedback. Otherwise, set it.
+                return { ...msg, feedback: msg.feedback === feedback ? undefined : feedback };
+            }
+            return msg;
+        }));
+        showToast("Feedback submitted!");
+    }, []);
+    
+    const handleShareClick = useCallback(async (text: string) => {
+        if (navigator.share) {
+            try {
+                await navigator.share({
+                    title: 'PAK AI Response',
+                    text: text,
+                });
+            } catch (error) {
+                console.error('Error sharing:', error);
+            }
+        } else {
+            handleCopyResponse(text); // Fallback to copy
+        }
+    }, []);
+
+    const handleRegenerate = useCallback(async (messageId: string) => {
+        const botMessageIndex = messages.findIndex(msg => msg.id === messageId);
+        if (botMessageIndex < 1) return;
+    
+        let userMessageIndex = -1;
+        for (let i = botMessageIndex - 1; i >= 0; i--) {
+            if (messages[i].sender === Sender.User) {
+                userMessageIndex = i;
+                break;
+            }
+        }
+        if (userMessageIndex === -1) return;
+    
+        const userMessage = messages[userMessageIndex];
+        const history = messages.slice(0, userMessageIndex);
+        
+        setIsProcessing(true);
+        setMessages(prev => prev.map(msg => msg.id === messageId ? { ...msg, isLoading: true, text: '', images: undefined, sources: undefined, prompt: undefined, isError: false, feedback: undefined } : msg));
+    
+        const textToSend = userMessage.text;
+        const imagesToSend = (userMessage.images || []).map(imgDataUrl => {
+            const [header, data] = imgDataUrl.split(',');
+            const mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
+            return { data, mimeType };
+        });
+
+        const historyForAPI: Content[] = history
+            .filter(msg => msg.id !== 'init' && !msg.isError && !msg.isLoading)
+            .flatMap(msg => {
+                const content: Content = { role: msg.sender === Sender.User ? 'user' : 'model', parts: [] };
+                if (msg.text) content.parts.push({ text: msg.text });
+                if (msg.images) {
+                    msg.images.forEach(imgDataUrl => {
+                        const [header, data] = imgDataUrl.split(',');
+                        if (data) {
+                            const mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
+                            content.parts.push({ inlineData: { mimeType, data } });
+                        }
+                    });
+                }
+                return content.parts.length > 0 ? [content] : [];
+            });
+    
+        try {
+            const botResponse = await sendMessage(textToSend, imagesToSend, historyForAPI);
+    
+            if (botResponse.needsAspectRatio && botResponse.pendingPrompt) {
+                const updatedMessage: ChatMessage = {
+                    id: messageId,
+                    sender: Sender.Bot,
+                    text: botResponse.text,
+                    isLoading: false,
+                    needsAspectRatio: true,
+                    prompt: botResponse.pendingPrompt,
+                };
+                setMessages(prev => prev.map(msg => msg.id === messageId ? updatedMessage : msg));
+                setIsProcessing(false);
+                return;
+            }
+            
+            const finalBotMessage: ChatMessage = {
+                id: messageId,
+                sender: Sender.Bot,
+                text: botResponse.text,
+                sources: botResponse.sources,
+                prompt: botResponse.prompt,
+                images: botResponse.image ? [botResponse.image] : undefined,
+                isLoading: false,
+            };
+    
+            setMessages(prev => prev.map(msg => msg.id === messageId ? finalBotMessage : msg));
+        } catch (error) {
+            console.error("Error regenerating response:", error);
+            setMessages(prev => prev.map(msg => msg.id === messageId ? { ...msg, text: `Error: ${(error as Error).message}`, isLoading: false, isError: true } : msg));
+        } finally {
+            setIsProcessing(false);
+        }
+    }, [messages]);
 
     return (
         <div className="flex flex-col h-screen bg-gray-800 text-gray-100 font-sans">
@@ -629,17 +885,42 @@ export default function App() {
             </header>
     
             <main ref={messageListRef} className="flex-1 overflow-y-auto p-6 space-y-4">
-                 {messages.map((msg) => (
-                    <Message
-                        key={msg.id}
-                        message={msg}
-                        onResizeClick={handleResizeClick}
-                        onReuseClick={handleReuseImage}
-                        onCopyPromptClick={handleCopyPromptClick}
-                        onDownloadClick={handleDownloadClick}
-                        onAspectRatioSelect={handleAspectRatioSelected}
-                    />
-                ))}
+                 {messages.map((msg, index) => {
+                    let promptToCopy: string | undefined = undefined;
+                    if (msg.sender === Sender.Bot) {
+                        if (msg.prompt && msg.prompt !== 'resized') {
+                            promptToCopy = msg.prompt;
+                        } else {
+                            // Find the last user message before this bot message
+                            for (let i = index - 1; i >= 0; i--) {
+                                if (messages[i].sender === Sender.User) {
+                                    promptToCopy = messages[i].text;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    return (
+                        <Message
+                            key={msg.id}
+                            message={msg}
+                            promptToCopy={promptToCopy}
+                            isSpeaking={speakingMessageId === msg.id}
+                            onResizeClick={handleResizeClick}
+                            onReuseClick={handleReuseImage}
+                            onCopyPromptClick={handleCopyPrompt}
+                            onCopyResponseClick={handleCopyResponse}
+                            onDownloadClick={handleDownloadClick}
+                            onAspectRatioSelect={handleAspectRatioSelected}
+                            onLikeClick={(id) => handleLikeDislike(id, 'liked')}
+                            onDislikeClick={(id) => handleLikeDislike(id, 'disliked')}
+                            onSpeakClick={handleSpeakClick}
+                            onRegenerateClick={handleRegenerate}
+                            onShareClick={handleShareClick}
+                        />
+                    );
+                })}
             </main>
     
             <footer className="bg-gray-900 p-4 border-t border-gray-700">

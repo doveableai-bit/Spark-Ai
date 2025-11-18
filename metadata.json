@@ -1,5 +1,7 @@
 {
   "name": "PAK AI",
   "description": "A powerful chatbot leveraging multiple Gemini models for text chat, image analysis, AI-powered image editing, and search-grounded responses for up-to-date information.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [
+    "microphone"
+  ]
 }
