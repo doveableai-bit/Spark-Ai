@@ -1,5 +1,5 @@
 
-import { GoogleGenAI, Chat, Modality, FunctionDeclaration, Type, Part, Content } from "@google/genai";
+import { GoogleGenAI, Modality, FunctionDeclaration, Type, Part, Content } from "@google/genai";
 import type { GroundingSource } from '../types';
 
 const API_KEY = process.env.API_KEY;
@@ -350,29 +350,29 @@ const executeComplexQuery = async (query: string): Promise<{ text: string }> => 
 
 // --- Exported Functions for UI ---
 
-export const resizeImage = async (image: { data: string; mimeType: string }, aspectRatio: string): Promise<{ image: string; text: string }> => {
+export const resizeImage = async (image: { data: string; mimeType: string }, aspectRatio: string, originalPrompt?: string): Promise<{ image: string; text: string }> => {
     let ratioDescription = "";
     let sizeInstructions = "";
     
     switch (aspectRatio) {
         case '1:1': 
-            ratioDescription = "square (1:1)"; 
+            ratioDescription = "SQUARE (1:1)"; 
             sizeInstructions = "1080x1080 pixels";
             break;
         case '9:16': 
-            ratioDescription = "vertical portrait (9:16)"; 
+            ratioDescription = "TALL PORTRAIT (9:16)"; 
             sizeInstructions = "1080x1920 pixels";
             break;
         case '16:9': 
-            ratioDescription = "wide landscape (16:9)"; 
+            ratioDescription = "WIDE LANDSCAPE (16:9)"; 
             sizeInstructions = "1920x1080 pixels";
             break;
         case '3:4': 
-            ratioDescription = "vertical portrait (3:4)"; 
+            ratioDescription = "PORTRAIT (3:4)"; 
             sizeInstructions = "1080x1440 pixels";
             break;
         case '4:3': 
-            ratioDescription = "landscape (4:3)"; 
+            ratioDescription = "LANDSCAPE (4:3)"; 
             sizeInstructions = "1440x1080 pixels";
             break;
         default: 
@@ -380,17 +380,29 @@ export const resizeImage = async (image: { data: string; mimeType: string }, asp
             sizeInstructions = "the requested aspect ratio";
     }
 
-    const prompt = `You are an expert image editor.
-    TASK: Reframe the attached image to a ${ratioDescription} aspect ratio (${sizeInstructions}).
+    // Include original prompt for context, or use a generic description if missing
+    const sceneDescription = originalPrompt ? `SCENE DESCRIPTION: "${originalPrompt}"` : "SCENE: The provided image.";
+
+    const prompt = `
+    CRITICAL TASK: CREATE A NEW IMAGE based on the attached reference.
     
-    CRITICAL REQUIREMENT: 
-    - KEEP THE IDENTICAL FACE, DRESS, AND ENVIRONMENT from the original image. 
-    - Do not regenerate the person or the scene.
-    - Use the provided image as the absolute visual truth.
-    - If widening: Extend the background naturally (outpaint) matching existing details.
-    - If cropping: Keep the subject perfectly centered.
+    TARGET ASPECT RATIO: ${aspectRatio} (${ratioDescription})
     
-    OUTPUT: A single high-quality image with NO FRAMES, NO BORDERS, NO DEVICE MOCKUPS. Full bleed.`;
+    INSTRUCTIONS:
+    1. IGNORE the aspect ratio of the attached reference image.
+    2. GENERATE a new image canvas with dimensions approx ${sizeInstructions}.
+    3. RECOMPOSE the scene to fit this new shape perfectly.
+       - If ${aspectRatio} is wider than original: OUTPAINT / EXTEND background horizontally.
+       - If ${aspectRatio} is taller than original: EXTEND background vertically.
+    4. CONSISTENCY IS KEY:
+       - Subject (Face, Body, Dress) MUST match the reference EXACTLY.
+       - Environment/Lighting MUST match the reference.
+    
+    OUTPUT:
+    - A single, high-quality image.
+    - FULL BLEED (No borders, no frames, no black bars).
+    - The image MUST fill the ${aspectRatio} frame completely.
+    `;
     
     try {
         const imagePart = { inlineData: { data: image.data, mimeType: image.mimeType } };
@@ -639,6 +651,8 @@ export const sendMessage = async (
                 if (!lastImage) {
                     return { text: "I'm sorry, I couldn't find an image to work with. Please upload one first." };
                 }
+                // Note: When called via tool use, we don't always have the original prompt handy unless extracted from context.
+                // For now, we pass undefined for originalPrompt, relying on the image data.
                 const result = await resizeImage(lastImage, toolArgs.aspectRatio as string);
                 return { image: result.image, text: result.text, prompt: 'resized' };
             }

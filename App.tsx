@@ -840,7 +840,8 @@ export default function App() {
                  const [header, data] = originalImageSrc.split(',');
                  const mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
                  const imageToResize = { data, mimeType };
-                 const res = await resizeImage(imageToResize, aspectRatio);
+                 // PASS ORIGINAL PROMPT TO RESIZE LOGIC TO ALLOW SEMANTIC OUTPAINTING
+                 const res = await resizeImage(imageToResize, aspectRatio, originalPrompt || '');
                  botResponse = { ...res, prompt: originalPrompt || 'resized' };
             } else if (originalPrompt) {
                 // Fallback to text-only generation only if image data is somehow missing
