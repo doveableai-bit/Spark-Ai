@@ -380,30 +380,17 @@ export const resizeImage = async (image: { data: string; mimeType: string }, asp
             sizeInstructions = "the requested aspect ratio";
     }
 
-    const consistencyCommands = `
-    CRITICAL CONSISTENCY COMMANDS:
-    - IDENTICAL SUBJECT APPEARANCE: Same face, body, features, colors
-    - EXACT SAME CLOTHING/STYLE: No changes to attire or accessories
-    - IDENTICAL BACKGROUND: Same environment, objects, lighting
-    - SAME ART STYLE: Maintain original style, quality, and details
-    - SAME LIGHTING: Identical light source, shadows, atmosphere
-    - PRESERVE ALL DETAILS: No alterations to character identity
+    const prompt = `You are an expert image editor.
+    TASK: Reframe the attached image to a ${ratioDescription} aspect ratio (${sizeInstructions}).
     
-    STRICT PROHIBITIONS:
-    - DO NOT change facial features
-    - DO NOT modify clothing or colors
-    - DO NOT alter background elements
-    - DO NOT change art style or quality
-    - DO NOT modify lighting conditions
-    - ABSOLUTELY NO FRAMES, NO BORDERS, NO BEZELS.
-    - DO NOT SHOW THE IMAGE ON A PHONE SCREEN OR DEVICE.
-    - The image must be FULL BLEED (extending to edges).`;
-
-    const prompt = `Resize this image to a ${ratioDescription} aspect ratio. RESIZE TO: ${sizeInstructions}. 
+    CRITICAL REQUIREMENT: 
+    - KEEP THE IDENTICAL FACE, DRESS, AND ENVIRONMENT from the original image. 
+    - Do not regenerate the person or the scene.
+    - Use the provided image as the absolute visual truth.
+    - If widening: Extend the background naturally (outpaint) matching existing details.
+    - If cropping: Keep the subject perfectly centered.
     
-    ${consistencyCommands} 
-    
-    Change the canvas dimensions to match ${aspectRatio} exactly. DO NOT alter character identity, facial features, clothing, or background. ONLY change composition and framing for ${aspectRatio} aspect ratio. NO FRAMES. The output must be a raw, frameless image.`;
+    OUTPUT: A single high-quality image with NO FRAMES, NO BORDERS, NO DEVICE MOCKUPS. Full bleed.`;
     
     try {
         const imagePart = { inlineData: { data: image.data, mimeType: image.mimeType } };

@@ -823,6 +823,7 @@ export default function App() {
     const handleExecuteResize = useCallback(async (aspectRatio: string) => {
         if (!resizeTask || !resizeTask.images || resizeTask.images.length === 0) return;
         setIsProcessing(true);
+        
         const { prompt: originalPrompt } = resizeTask;
         const originalImageSrc = resizeTask.images[0];
         setResizeTask(null);
@@ -833,20 +834,26 @@ export default function App() {
         
         try {
             let botResponse;
-            if (originalPrompt) {
+            // CRITICAL CHANGE: Always prefer the image data if available for resizing
+            // This ensures we preserve visual details (Face, Dress, Env) via Image-to-Image
+            if (originalImageSrc) {
+                 const [header, data] = originalImageSrc.split(',');
+                 const mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
+                 const imageToResize = { data, mimeType };
+                 const res = await resizeImage(imageToResize, aspectRatio);
+                 botResponse = { ...res, prompt: originalPrompt || 'resized' };
+            } else if (originalPrompt) {
+                // Fallback to text-only generation only if image data is somehow missing
                 botResponse = await executePendingImageGeneration(originalPrompt, aspectRatio);
             } else {
-                const [header, data] = originalImageSrc.split(',');
-                const mimeType = header.match(/:(.*?);/)?.[1] || 'image/png';
-                const imageToResize = { data, mimeType };
-                const res = await resizeImage(imageToResize, aspectRatio);
-                botResponse = { ...res, prompt: undefined };
+                throw new Error("No image or prompt found to resize.");
             }
+            
              const finalBotMessage: ChatMessage = {
                 id: botMessageId,
                 sender: Sender.Bot,
                 text: botResponse.text,
-                prompt: botResponse.prompt || originalPrompt || undefined,
+                prompt: botResponse.prompt,
                 images: botResponse.image ? [botResponse.image] : undefined,
                 isLoading: false,
             };
